@@ -559,7 +559,7 @@ async def execute_tool_block(
         do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
-        do_app_api,
+        do_app_api, do_manage_video, do_publish_youtube,
     )
 
     tool = block.tool_type
@@ -711,6 +711,12 @@ async def execute_tool_block(
     elif tool == "manage_calendar":
         desc = "manage_calendar"
         result = await do_manage_calendar(content, owner=owner)
+    elif tool == "manage_video":
+        desc = "manage_video"
+        result = await do_manage_video(content, owner=owner)
+    elif tool == "publish_youtube":
+        desc = "publish_youtube"
+        result = await do_publish_youtube(content, owner=owner)
     elif tool == "download_model":
         desc = "download_model"
         result = await do_download_model(content, owner=owner)

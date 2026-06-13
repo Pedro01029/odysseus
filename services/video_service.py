@@ -502,3 +502,163 @@ class VideoService:
                 return {"error": "Failed to parse LLM edit plan response."}
         finally:
             db.close()
+
+    def render_project_clip_sync(self, project_id: int, edit_instructions: List[dict]) -> Any:
+        """Helper to build the moviepy video composition from instructions."""
+        if not MOVIEPY_AVAILABLE:
+            raise ImportError("moviepy is not installed.")
+
+        from moviepy.video.io.VideoFileClip import VideoFileClip
+        from moviepy.video.compositing.concatenate import concatenate_videoclips
+        from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
+        from moviepy.video.fx.all import crop
+        
+        db = SessionLocal()
+        opened_clips = []
+        try:
+            # 1. Load clips from db
+            clips_in_db = db.query(VideoClip).filter(VideoClip.project_id == project_id).order_by(VideoClip.position.asc()).all()
+            clips_map = {c.id: c for c in clips_in_db}
+            
+            # 2. Build list of moviepy clips
+            subclips_list = []
+            do_vertical_crop = False
+            
+            for inst in edit_instructions:
+                action = inst.get("action")
+                if action == "crop_vertical":
+                    do_vertical_crop = True
+                    continue
+                    
+                if action in ("trim", "use_clip"):
+                    c_id = inst.get("clip_id")
+                    clip_data = clips_map.get(c_id)
+                    if not clip_data or not os.path.exists(clip_data.file_path):
+                        continue
+                        
+                    mv_clip = VideoFileClip(clip_data.file_path)
+                    opened_clips.append(mv_clip)
+                    
+                    start = inst.get("start", clip_data.trim_start or 0.0)
+                    end = inst.get("end", clip_data.trim_end or mv_clip.duration)
+                    
+                    if start < 0: start = 0.0
+                    if end > mv_clip.duration: end = mv_clip.duration
+                    if start < end:
+                        mv_clip = mv_clip.subclip(start, end)
+                        
+                    subclips_list.append(mv_clip)
+            
+            if not subclips_list:
+                for c in clips_in_db:
+                    if os.path.exists(c.file_path):
+                        mv_clip = VideoFileClip(c.file_path)
+                        opened_clips.append(mv_clip)
+                        subclips_list.append(mv_clip)
+            
+            if not subclips_list:
+                raise ValueError("No video clips available to render.")
+                
+            # 3. Concatenate clips
+            final_clip = concatenate_videoclips(subclips_list)
+            
+            # 4. Crop vertically if requested (16:9 -> 9:16)
+            if do_vertical_crop:
+                w, h = final_clip.size
+                new_w = int(h * 9 / 16)
+                x1 = int((w - new_w) / 2)
+                final_clip = crop(final_clip, x1=x1, y1=0, width=new_w, height=h)
+                
+            # 5. Overlays (text overlays)
+            text_overlays = [inst for inst in edit_instructions if inst.get("action") == "add_text"]
+            if text_overlays:
+                try:
+                    from moviepy.video.VideoClip import TextClip
+                    txt_clips = []
+                    for to in text_overlays:
+                        text = to.get("text", "")
+                        start = to.get("start", 0.0)
+                        end = to.get("end", final_clip.duration)
+                        position = to.get("position", "center")
+                        
+                        if text:
+                            try:
+                                t_clip = TextClip(text, fontsize=48, color='white', font='Arial')
+                                t_clip = t_clip.set_pos(position).set_start(start).set_duration(end - start)
+                                txt_clips.append(t_clip)
+                                opened_clips.append(t_clip)
+                            except Exception as txt_ex:
+                                logger.warning(f"Could not create TextClip (ImageMagick likely missing): {txt_ex}")
+                    
+                    if txt_clips:
+                        final_clip = CompositeVideoClip([final_clip] + txt_clips)
+                except ImportError:
+                    logger.warning("TextClip not importable. Skipping text overlays.")
+            
+            return final_clip, opened_clips
+        except Exception:
+            # If error occurs, close what we opened
+            for c in opened_clips:
+                try: c.close()
+                except Exception: pass
+            raise
+        finally:
+            db.close()
+
+    def render_final_sync(self, project_id: int, edit_instructions: List[dict], output_path: str, quality: str = "high") -> str:
+        """Synchronously renders the final video. Called via asyncio.to_thread."""
+        final_clip = None
+        opened_clips = []
+        try:
+            final_clip, opened_clips = self.render_project_clip_sync(project_id, edit_instructions)
+            
+            fps = 30
+            preset = "medium"
+            if quality == "draft":
+                fps = 24
+                preset = "ultrafast"
+                
+            final_clip.write_videofile(
+                output_path,
+                fps=fps,
+                codec="libx264",
+                audio_codec="aac",
+                preset=preset,
+                logger=None
+            )
+            return output_path
+        finally:
+            if final_clip:
+                try: final_clip.close()
+                except Exception: pass
+            for c in opened_clips:
+                try: c.close()
+                except Exception: pass
+
+    async def render_final(self, project_id: int, edit_instructions: List[dict], output_path: str, quality: str = "high") -> str:
+        return await asyncio.to_thread(self.render_final_sync, project_id, edit_instructions, output_path, quality)
+
+    def render_preview_sync(self, project_id: int, edit_instructions: List[dict], timestamp: float, output_path: str) -> str:
+        """Extracts and saves a single frame preview as a JPG."""
+        final_clip = None
+        opened_clips = []
+        try:
+            final_clip, opened_clips = self.render_project_clip_sync(project_id, edit_instructions)
+            
+            if timestamp > final_clip.duration:
+                timestamp = final_clip.duration - 0.1
+            if timestamp < 0:
+                timestamp = 0.0
+                
+            final_clip.save_frame(output_path, t=timestamp)
+            return output_path
+        finally:
+            if final_clip:
+                try: final_clip.close()
+                except Exception: pass
+            for c in opened_clips:
+                try: c.close()
+                except Exception: pass
+
+    async def render_preview(self, project_id: int, edit_instructions: List[dict], timestamp: float, output_path: str) -> str:
+        return await asyncio.to_thread(self.render_preview_sync, project_id, edit_instructions, timestamp, output_path)

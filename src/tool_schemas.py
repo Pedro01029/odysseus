@@ -1047,6 +1047,66 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_video",
+            "description": "Video project management: upload clips, list projects, create projects, retrieve project details, run AI format analysis, suggest edit plans, preview timeline frames, and start rendering.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list_projects", "create_project", "get_project", "update_project", "delete_project", "analyze", "edit_plan", "save_edits", "render", "render_status"],
+                        "description": "Action to perform"
+                    },
+                    "project_id": {"type": "integer", "description": "Project ID (required for get_project, update_project, delete_project, analyze, edit_plan, save_edits, render, render_status)"},
+                    "title": {"type": "string", "description": "Project title (for create/update)"},
+                    "description": {"type": "string", "description": "Project description (for create/update)"},
+                    "clip_ids": {"type": "array", "items": {"type": "integer"}, "description": "List of clip IDs to associate/reorder in the project"},
+                    "edit_instructions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string", "enum": ["trim", "add_text", "crop_vertical", "concat"]},
+                                "clip_id": {"type": "integer"},
+                                "clip_ids": {"type": "array", "items": {"type": "integer"}},
+                                "start": {"type": "number"},
+                                "end": {"type": "number"},
+                                "text": {"type": "string"},
+                                "position": {"type": "string"},
+                                "transition": {"type": "string"}
+                            }
+                        },
+                        "description": "List of edit operations (for save_edits/render)"
+                    },
+                    "quality": {"type": "string", "enum": ["draft", "high"], "description": "Output rendering quality"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "publish_youtube",
+            "description": "Publish a rendered video project to YouTube with custom title, description, tags, and privacy settings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "integer", "description": "Video Project ID to publish"},
+                    "account_id": {"type": "integer", "description": "YouTubeAccount ID (optional; defaults to first connected channel)"},
+                    "title": {"type": "string", "description": "YouTube video title (optional; prefilled from project analysis if omitted)"},
+                    "description": {"type": "string", "description": "YouTube video description (optional; prefilled from project analysis if omitted)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "YouTube video tags (optional; prefilled from project analysis if omitted)"},
+                    "privacy": {"type": "string", "enum": ["public", "private", "unlisted"], "description": "YouTube privacy status (default 'unlisted')"},
+                    "category": {"type": "string", "description": "YouTube category ID (optional)"}
+                },
+                "required": ["project_id"]
+            }
+        }
+    },
 ]
 
 

@@ -4162,3 +4162,227 @@ async def do_vault_unlock(content: str, owner: Optional[str] = None) -> Dict:
         pass
 
     return {"output": "Vault unlocked. Session saved.", "exit_code": 0}
+
+
+async def do_manage_video(content: str, owner: Optional[str] = None) -> Dict:
+    """Handle manage_video tool calls: CRUD on video projects, formatting recommendations, edit suggestions, and rendering."""
+    from core.database import SessionLocal, VideoProject, VideoClip
+    from services.video_service import VideoService
+    
+    try:
+        args = _parse_tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+        
+    action = (args.get("action") or "").strip().lower()
+    db = SessionLocal()
+    video_service = VideoService()
+    
+    try:
+        if action == "list_projects":
+            q = db.query(VideoProject)
+            if owner is not None:
+                q = q.filter(VideoProject.owner == owner)
+            projects = q.all()
+            if not projects:
+                return {"response": "No video projects found.", "exit_code": 0}
+            lines = [f"- Project ID: {p.id} | Title: {p.title} | Status: {p.status}" for p in projects]
+            return {"response": "\n".join(lines), "exit_code": 0}
+            
+        elif action == "create_project":
+            title = args.get("title", "Untitled Project")
+            description = args.get("description")
+            project = VideoProject(
+                owner=owner,
+                title=title,
+                description=description,
+                status="draft"
+            )
+            db.add(project)
+            db.commit()
+            db.refresh(project)
+            
+            clip_ids = args.get("clip_ids", [])
+            if clip_ids:
+                for idx, c_id in enumerate(clip_ids):
+                    clip = db.query(VideoClip).filter(VideoClip.id == c_id)
+                    if owner is not None:
+                        clip = clip.filter(VideoClip.owner == owner)
+                    clip = clip.first()
+                    if clip:
+                        clip.project_id = project.id
+                        clip.position = idx
+                db.commit()
+                
+            return {"response": f"Project '{title}' created with ID {project.id}.", "project_id": project.id, "exit_code": 0}
+            
+        elif action == "get_project":
+            project_id = args.get("project_id")
+            if not project_id:
+                return {"error": "project_id is required", "exit_code": 1}
+                
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                return {"error": f"Project {project_id} not found", "exit_code": 1}
+                
+            clips = db.query(VideoClip).filter(VideoClip.project_id == project_id).order_by(VideoClip.position.asc()).all()
+            
+            response_text = (
+                f"Project ID: {project.id}\n"
+                f"Title: {project.title}\n"
+                f"Description: {project.description or ''}\n"
+                f"Status: {project.status}\n"
+                f"Format Recommendation: {project.format_recommendation or 'None'}\n"
+                f"Format Reasoning: {project.format_reasoning or 'None'}\n"
+                f"Output Path: {project.output_path or 'None'}\n"
+                f"YouTube Video ID: {project.youtube_video_id or 'None'}\n"
+                f"Clips associated ({len(clips)}):\n"
+            )
+            for c in clips:
+                response_text += f"- Clip ID {c.id}: {c.file_name} ({c.duration_seconds or 0.0:.1f}s) | Position: {c.position}\n"
+                
+            return {"response": response_text, "exit_code": 0}
+            
+        elif action == "update_project":
+            project_id = args.get("project_id")
+            if not project_id:
+                return {"error": "project_id is required", "exit_code": 1}
+                
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                return {"error": f"Project {project_id} not found", "exit_code": 1}
+                
+            if "title" in args:
+                project.title = args["title"]
+            if "description" in args:
+                project.description = args["description"]
+            if "clip_ids" in args:
+                db.query(VideoClip).filter(VideoClip.project_id == project_id).update({"project_id": None})
+                for idx, c_id in enumerate(args["clip_ids"]):
+                    clip = db.query(VideoClip).filter(VideoClip.id == c_id)
+                    if owner is not None:
+                        clip = clip.filter(VideoClip.owner == owner)
+                    clip = clip.first()
+                    if clip:
+                        clip.project_id = project_id
+                        clip.position = idx
+            db.commit()
+            return {"response": f"Project {project_id} updated successfully.", "exit_code": 0}
+            
+        elif action == "delete_project":
+            project_id = args.get("project_id")
+            if not project_id:
+                return {"error": "project_id is required", "exit_code": 1}
+                
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                return {"error": f"Project {project_id} not found", "exit_code": 1}
+                
+            db.query(VideoClip).filter(VideoClip.project_id == project_id).update({"project_id": None})
+            db.delete(project)
+            db.commit()
+            return {"response": f"Project {project_id} deleted.", "exit_code": 0}
+            
+        elif action == "analyze":
+            project_id = args.get("project_id")
+            if not project_id:
+                return {"error": "project_id is required", "exit_code": 1}
+            res = await video_service.analyze_project(project_id, owner=owner)
+            if "error" in res:
+                return {"error": res["error"], "exit_code": 1}
+            return {"response": f"Analysis complete:\nRecommendation: {res.get('format_recommendation')}\nReasoning: {res.get('format_reasoning')}\nSuggested Title: {res.get('suggested_title')}", "exit_code": 0}
+            
+        elif action == "edit_plan":
+            project_id = args.get("project_id")
+            if not project_id:
+                return {"error": "project_id is required", "exit_code": 1}
+            res = await video_service.suggest_edit_plan(project_id, owner=owner)
+            if "error" in res:
+                return {"error": res["error"], "exit_code": 1}
+            instructions = res.get("edit_instructions", [])
+            lines = [f"- {inst.get('action')}: {inst}" for inst in instructions]
+            return {"response": f"AI Edit Plan Reasoning: {res.get('reasoning')}\nInstructions:\n" + "\n".join(lines), "exit_code": 0}
+            
+        elif action == "save_edits":
+            project_id = args.get("project_id")
+            instructions = args.get("edit_instructions")
+            if not project_id or instructions is None:
+                return {"error": "project_id and edit_instructions are required", "exit_code": 1}
+                
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                return {"error": f"Project {project_id} not found", "exit_code": 1}
+                
+            pub_settings = project.publish_settings or {}
+            pub_settings["edit_instructions"] = instructions
+            project.publish_settings = pub_settings
+            db.commit()
+            return {"response": "Edit instructions saved successfully.", "exit_code": 0}
+            
+        elif action == "render":
+            project_id = args.get("project_id")
+            if not project_id:
+                return {"error": "project_id is required", "exit_code": 1}
+                
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                return {"error": f"Project {project_id} not found", "exit_code": 1}
+                
+            pub_settings = project.publish_settings or {}
+            instructions = args.get("edit_instructions") or pub_settings.get("edit_instructions", [])
+            quality = args.get("quality", "high")
+            
+            project.status = "rendering"
+            db.commit()
+            
+            import uuid as _uuid
+            output_filename = f"render_{project_id}_{_uuid.uuid4().hex[:8]}.mp4"
+            output_path = os.path.abspath(os.path.join(video_service.render_dir, output_filename))
+            
+            try:
+                await video_service.render_final(project_id, instructions, output_path, quality)
+                project.status = "ready"
+                project.output_path = output_path
+                db.commit()
+                return {"response": f"Project {project_id} rendered successfully to {output_path}.", "exit_code": 0}
+            except Exception as render_ex:
+                project.status = "failed"
+                db.commit()
+                return {"error": f"Render failed: {str(render_ex)}", "exit_code": 1}
+                
+        elif action == "render_status":
+            project_id = args.get("project_id")
+            if not project_id:
+                return {"error": "project_id is required", "exit_code": 1}
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                return {"error": f"Project {project_id} not found", "exit_code": 1}
+            return {"response": f"Project {project_id} render status: {project.status}. Output path: {project.output_path or 'None'}", "exit_code": 0}
+            
+        else:
+            return {"error": f"Unknown action: {action}", "exit_code": 1}
+    finally:
+        db.close()
+
+
+async def do_publish_youtube(content: str, owner: Optional[str] = None) -> Dict:
+    """Placeholder for publish_youtube tool (fully implemented in Step 5)."""
+    return {"response": "YouTube publishing tool is active. Setup Step 5 OAuth first.", "exit_code": 0}

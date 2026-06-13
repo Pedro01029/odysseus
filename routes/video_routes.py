@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 import shutil
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from core.database import SessionLocal, VideoClip, VideoProject, YouTubeAccount
@@ -23,6 +24,11 @@ class ProjectUpdate(BaseModel):
     description: Optional[str] = None
     clip_ids: Optional[List[int]] = None
     status: Optional[str] = None
+
+class ProjectEditRequest(BaseModel):
+    edit_instructions: List[dict]
+    quality: Optional[str] = "high"
+
 
 
 router = APIRouter(prefix="/api/video", tags=["video"])
@@ -109,6 +115,31 @@ async def run_visual_analysis_background(clip_id: int, owner: Optional[str]):
         except Exception as e:
             logger.error(f"Failed to generate visual summary for clip {clip_id}: {e}")
             clip.visual_summary = f"Visual analysis failed: {str(e)}"
+            db.commit()
+    finally:
+        db.close()
+
+async def run_project_render_background(project_id: int, edit_instructions: List[dict], quality: str, owner: Optional[str]):
+    db = SessionLocal()
+    try:
+        project = db.query(VideoProject).filter(VideoProject.id == project_id).first()
+        if not project:
+            logger.error(f"Project {project_id} not found for rendering.")
+            return
+            
+        video_service = VideoService()
+        output_filename = f"render_{project_id}_{uuid.uuid4().hex[:8]}.mp4"
+        output_path = os.path.abspath(os.path.join(video_service.render_dir, output_filename))
+        
+        try:
+            await video_service.render_final(project_id, edit_instructions, output_path, quality)
+            project.status = "ready"
+            project.output_path = output_path
+            db.commit()
+            logger.info(f"Successfully rendered project {project_id} to {output_path}")
+        except Exception as e:
+            logger.error(f"Failed to render project {project_id}: {e}")
+            project.status = "failed"
             db.commit()
     finally:
         db.close()
@@ -457,5 +488,123 @@ def setup_video_routes():
         except Exception as e:
             logger.error(f"Edit plan error: {e}")
             raise HTTPException(500, str(e))
+
+    # --- SAVE EDITS ---
+    @router.post("/projects/{project_id}/edit")
+    def apply_project_edits(project_id: int, request: Request, body: ProjectEditRequest):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+                
+            pub_settings = project.publish_settings or {}
+            pub_settings["edit_instructions"] = body.edit_instructions
+            project.publish_settings = pub_settings
+            db.commit()
+            
+            return {"success": True, "project": project.to_dict()}
+        finally:
+            db.close()
+
+    # --- GET PREVIEW ---
+    @router.get("/projects/{project_id}/preview")
+    async def get_project_preview(project_id: int, request: Request, timestamp: float = 0.0):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+                
+            pub_settings = project.publish_settings or {}
+            edit_instructions = pub_settings.get("edit_instructions", [])
+            
+            video_service = VideoService()
+            preview_filename = f"preview_{project_id}.jpg"
+            preview_path = os.path.abspath(os.path.join(video_service.render_dir, preview_filename))
+            
+            try:
+                await video_service.render_preview(project_id, edit_instructions, timestamp, preview_path)
+                return FileResponse(preview_path, media_type="image/jpeg")
+            except Exception as e:
+                logger.error(f"Preview rendering failed: {e}")
+                raise HTTPException(500, f"Preview failed: {str(e)}")
+        finally:
+            db.close()
+
+    # --- START RENDER ---
+    @router.post("/projects/{project_id}/render")
+    def start_project_render(project_id: int, request: Request, background_tasks: BackgroundTasks, body: Optional[ProjectEditRequest] = None):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+                
+            edit_instructions = []
+            quality = "high"
+            if body:
+                edit_instructions = body.edit_instructions
+                quality = body.quality or "high"
+            else:
+                pub_settings = project.publish_settings or {}
+                edit_instructions = pub_settings.get("edit_instructions", [])
+                
+            project.status = "rendering"
+            db.commit()
+            
+            background_tasks.add_task(run_project_render_background, project_id, edit_instructions, quality, user)
+            
+            return {"success": True, "message": "Render task started.", "project": project.to_dict()}
+        finally:
+            db.close()
+
+    # --- GET RENDER STATUS ---
+    @router.get("/projects/{project_id}/render/status")
+    def get_render_status(project_id: int, request: Request):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+            return {"status": project.status, "output_path": project.output_path}
+        finally:
+            db.close()
+
+    # --- DOWNLOAD RENDERED VIDEO ---
+    @router.get("/projects/{project_id}/download")
+    def download_rendered_video(project_id: int, request: Request):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+                
+            if not project.output_path or not os.path.exists(project.output_path):
+                raise HTTPException(400, "Rendered video file not found or render has not completed yet.")
+                
+            return FileResponse(project.output_path, media_type="video/mp4", filename=f"project_{project_id}.mp4")
+        finally:
+            db.close()
 
     return router

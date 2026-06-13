@@ -176,3 +176,63 @@ async def test_suggest_edit_plan(mock_session_local, mock_resolve, mock_llm_call
         os.rmdir("data_test")
     except Exception:
         pass
+
+
+@pytest.mark.asyncio
+@patch("services.video_service.VideoService.render_project_clip_sync")
+async def test_render_final_and_preview(mock_render_sync):
+    mock_clip_obj = MagicMock()
+    mock_clip_obj.duration = 20.0
+    mock_render_sync.return_value = (mock_clip_obj, [])
+    
+    service = VideoService(data_dir="data_test")
+    
+    # Test final render call
+    with patch.object(mock_clip_obj, "write_videofile") as mock_write:
+        res = await service.render_final(project_id=1, edit_instructions=[], output_path="out.mp4")
+        assert res == "out.mp4"
+        mock_write.assert_called_once()
+        
+    # Test preview call
+    with patch.object(mock_clip_obj, "save_frame") as mock_save:
+        res = await service.render_preview(project_id=1, edit_instructions=[], timestamp=5.0, output_path="out.jpg")
+        assert res == "out.jpg"
+        mock_save.assert_called_once_with("out.jpg", t=5.0)
+        
+    try:
+        os.rmdir(service.upload_dir)
+        os.rmdir(service.keyframe_dir)
+        os.rmdir(service.render_dir)
+        os.rmdir(os.path.join("data_test", "video"))
+        os.rmdir("data_test")
+    except Exception:
+        pass
+
+
+@pytest.mark.asyncio
+@patch("core.database.SessionLocal")
+async def test_do_manage_video_tool(mock_session_local):
+    from src.tool_implementations import do_manage_video
+    
+    mock_db = MagicMock()
+    mock_session_local.return_value = mock_db
+    
+    # 1. Test list_projects
+    mock_project = MagicMock()
+    mock_project.id = 1
+    mock_project.title = "Test Proj"
+    mock_project.status = "draft"
+    mock_db.query.return_value.all.return_value = [mock_project]
+    
+    result = await do_manage_video('{"action": "list_projects"}')
+    assert result["exit_code"] == 0
+    assert "Test Proj" in result["response"]
+    
+    # 2. Test get_project
+    mock_db.query.return_value.filter.return_value.first.return_value = mock_project
+    mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    
+    result = await do_manage_video('{"action": "get_project", "project_id": 1}')
+    assert result["exit_code"] == 0
+    assert "Test Proj" in result["response"]
+
