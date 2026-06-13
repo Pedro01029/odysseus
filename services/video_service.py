@@ -321,3 +321,184 @@ class VideoService:
             "format": recommended,
             "reasoning": f"Fallback default recommendation based on duration of {duration:.1f} seconds."
         }
+
+    async def analyze_project(self, project_id: int, owner: str = None) -> dict:
+        from core.database import SessionLocal, VideoProject, VideoClip
+        from src.endpoint_resolver import resolve_endpoint
+        from src.llm_core import llm_call_async
+        
+        db = SessionLocal()
+        try:
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                raise ValueError("Project not found")
+                
+            # Aggregate clips data
+            clips = db.query(VideoClip).filter(VideoClip.project_id == project_id).order_by(VideoClip.position.asc()).all()
+            if not clips:
+                return {"error": "No clips assigned to this project."}
+                
+            total_duration = sum(c.duration_seconds or 0.0 for c in clips)
+            aggregated_transcript = []
+            aggregated_visuals = []
+            
+            for i, c in enumerate(clips):
+                c_name = c.file_name or f"Clip {i+1}"
+                if c.transcript:
+                    aggregated_transcript.append(f"[{c_name}] (duration: {c.duration_seconds or 0.0:.1f}s):\n{c.transcript}")
+                if c.visual_summary and "unavailable" not in c.visual_summary:
+                    aggregated_visuals.append(f"[{c_name}]:\n{c.visual_summary}")
+                    
+            transcript_text = "\n\n".join(aggregated_transcript)
+            visuals_text = "\n\n".join(aggregated_visuals)
+            
+            # Resolve endpoint
+            url, model, headers = resolve_endpoint("utility", owner=owner)
+            if not url or not model:
+                url, model, headers = resolve_endpoint("default", owner=owner)
+                
+            if not url or not model:
+                return {"error": "No LLM endpoint configured."}
+                
+            prompt = (
+                "You are an expert AI video content strategist and editor.\n"
+                "Analyze the following aggregated details from the source clips of a video project to recommend publishing options and content highlights.\n\n"
+                f"Project Title: {project.title}\n"
+                f"Total Duration: {total_duration:.1f} seconds\n"
+                f"Aggregated Clips Transcripts:\n{transcript_text[:8000]}\n\n"
+                f"Aggregated Clips Visual Summaries:\n{visuals_text[:4000]}\n\n"
+                "Recommend the best publishing format:\n"
+                "- 'short' (vertical under 60s, e.g. TikTok, Shorts, Reels)\n"
+                "- 'long' (traditional horizontal video)\n"
+                "- 'both' (can be produced in both formats)\n\n"
+                "Generate suggestions for YouTube title, description, and tags.\n\n"
+                "Return ONLY raw JSON in the following schema (no extra keys, no markdown wrappers):\n"
+                "{\n"
+                '  "format_recommendation": "short|long|both",\n'
+                '  "format_reasoning": "detailed explanation of why",\n'
+                '  "suggested_title": "suggested youtube title",\n'
+                '  "suggested_description": "suggested youtube description with timestamps/summary",\n'
+                '  "suggested_tags": ["tag1", "tag2", "tag3"],\n'
+                '  "highlights": "bullet list of top moments or key topics discussed"\n'
+                "}"
+            )
+            
+            response = await llm_call_async(
+                url=url,
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                headers=headers,
+                temperature=0.3,
+                max_tokens=1000,
+                timeout=90
+            )
+            
+            parsed = parse_llm_json(response)
+            if parsed:
+                # Update project
+                project.format_recommendation = parsed.get("format_recommendation", "long")
+                project.format_reasoning = parsed.get("format_reasoning", "")
+                project.description = parsed.get("highlights", "")
+                
+                # Update publish settings
+                pub_settings = project.publish_settings or {}
+                pub_settings.update({
+                    "title": parsed.get("suggested_title", project.title),
+                    "description": parsed.get("suggested_description", ""),
+                    "tags": parsed.get("suggested_tags", []),
+                })
+                project.publish_settings = pub_settings
+                db.commit()
+                
+                return parsed
+            else:
+                return {"error": "Failed to parse LLM analysis response."}
+        finally:
+            db.close()
+
+    async def suggest_edit_plan(self, project_id: int, owner: str = None) -> dict:
+        from core.database import SessionLocal, VideoProject, VideoClip
+        from src.endpoint_resolver import resolve_endpoint
+        from src.llm_core import llm_call_async
+        
+        db = SessionLocal()
+        try:
+            project = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if owner is not None:
+                project = project.filter(VideoProject.owner == owner)
+            project = project.first()
+            if not project:
+                raise ValueError("Project not found")
+                
+            # Aggregate clips data
+            clips = db.query(VideoClip).filter(VideoClip.project_id == project_id).order_by(VideoClip.position.asc()).all()
+            if not clips:
+                return {"error": "No clips assigned to this project."}
+                
+            aggregated_transcript = []
+            for i, c in enumerate(clips):
+                c_name = c.file_name or f"Clip {i+1}"
+                if c.transcript_segments:
+                    segments_list = c.transcript_segments
+                    if isinstance(segments_list, str):
+                        try:
+                            segments_list = json.loads(segments_list)
+                        except Exception:
+                            segments_list = []
+                    segments_str = "\n".join(
+                        f"[{seg.get('timestamp', '00:00')}] ({seg.get('start', 0.0):.1f}s - {seg.get('end', 0.0):.1f}s): {seg.get('text', '')}"
+                        for seg in segments_list
+                    )
+                    aggregated_transcript.append(f"[{c_name}] (ID: {c.id}):\n{segments_str}")
+                elif c.transcript:
+                    aggregated_transcript.append(f"[{c_name}] (ID: {c.id}):\n{c.transcript}")
+                    
+            transcript_text = "\n\n".join(aggregated_transcript)
+            
+            # Resolve endpoint
+            url, model, headers = resolve_endpoint("utility", owner=owner)
+            if not url or not model:
+                url, model, headers = resolve_endpoint("default", owner=owner)
+                
+            if not url or not model:
+                return {"error": "No LLM endpoint configured."}
+                
+            prompt = (
+                "You are an expert AI video editor.\n"
+                "Based on the following timestamped transcripts from the clips, generate a detailed step-by-step editing plan.\n"
+                "Specifically, identify the key parts/segments to keep, cut, or speed up, where to place text overlays, and "
+                "recommend transitions.\n\n"
+                f"Project Title: {project.title}\n"
+                f"Aggregated Clips Transcripts with Timestamps:\n{transcript_text[:8000]}\n\n"
+                "Create a structured JSON edit plan in the format below. The 'edit_instructions' key must contain a list of concrete actions to perform.\n"
+                "Return ONLY raw JSON in the following schema (no extra keys, no markdown wrappers):\n"
+                "{\n"
+                '  "reasoning": "general summary of editing strategy",\n'
+                '  "edit_instructions": [\n'
+                '    {"action": "trim", "clip_id": 1, "start": 0.0, "end": 15.5},\n'
+                '    {"action": "add_text", "text": "Hook line!", "position": "center", "start": 1.0, "end": 4.5},\n'
+                '    {"action": "concat", "clip_ids": [1, 2], "transition": "fade"}\n'
+                '  ]\n'
+                "}"
+            )
+            
+            response = await llm_call_async(
+                url=url,
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                headers=headers,
+                temperature=0.2,
+                max_tokens=1200,
+                timeout=90
+            )
+            
+            parsed = parse_llm_json(response)
+            if parsed:
+                return parsed
+            else:
+                return {"error": "Failed to parse LLM edit plan response."}
+        finally:
+            db.close()

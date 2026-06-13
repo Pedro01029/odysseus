@@ -13,6 +13,18 @@ from services.video_service import VideoService
 
 logger = logging.getLogger(__name__)
 
+class ProjectCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    clip_ids: Optional[List[int]] = None
+
+class ProjectUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    clip_ids: Optional[List[int]] = None
+    status: Optional[str] = None
+
+
 router = APIRouter(prefix="/api/video", tags=["video"])
 
 # ---------------------------------------------------------------------------
@@ -289,5 +301,161 @@ def setup_video_routes():
             }
         finally:
             db.close()
+
+    # --- CREATE PROJECT ---
+    @router.post("/projects")
+    def create_project(request: Request, body: ProjectCreate):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            project = VideoProject(
+                owner=user,
+                title=body.title,
+                description=body.description,
+                status="draft"
+            )
+            db.add(project)
+            db.commit()
+            db.refresh(project)
+            
+            if body.clip_ids:
+                for idx, c_id in enumerate(body.clip_ids):
+                    clip = db.query(VideoClip).filter(VideoClip.id == c_id)
+                    if user is not None:
+                        clip = clip.filter(VideoClip.owner == user)
+                    clip = clip.first()
+                    if clip:
+                        clip.project_id = project.id
+                        clip.position = idx
+                db.commit()
+                
+            return project.to_dict()
+        finally:
+            db.close()
+
+    # --- LIST PROJECTS ---
+    @router.get("/projects")
+    def list_projects(request: Request):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            projects = query.order_by(VideoProject.created_at.desc()).all()
+            return {"projects": [p.to_dict() for p in projects]}
+        finally:
+            db.close()
+
+    # --- GET PROJECT ---
+    @router.get("/projects/{project_id}")
+    def get_project(project_id: int, request: Request):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+                
+            clips = db.query(VideoClip).filter(VideoClip.project_id == project_id).order_by(VideoClip.position.asc()).all()
+            
+            res = project.to_dict()
+            res["clips"] = [c.to_dict() for c in clips]
+            return res
+        finally:
+            db.close()
+
+    # --- UPDATE PROJECT ---
+    @router.put("/projects/{project_id}")
+    def update_project(project_id: int, request: Request, body: ProjectUpdate):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+                
+            if body.title is not None:
+                project.title = body.title
+            if body.description is not None:
+                project.description = body.description
+            if body.status is not None:
+                project.status = body.status
+                
+            if body.clip_ids is not None:
+                db.query(VideoClip).filter(VideoClip.project_id == project_id).update({"project_id": None})
+                
+                for idx, c_id in enumerate(body.clip_ids):
+                    clip = db.query(VideoClip).filter(VideoClip.id == c_id)
+                    if user is not None:
+                        clip = clip.filter(VideoClip.owner == user)
+                    clip = clip.first()
+                    if clip:
+                        clip.project_id = project_id
+                        clip.position = idx
+                        
+            db.commit()
+            return project.to_dict()
+        finally:
+            db.close()
+
+    # --- DELETE PROJECT ---
+    @router.delete("/projects/{project_id}")
+    def delete_project(project_id: int, request: Request):
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            query = db.query(VideoProject).filter(VideoProject.id == project_id)
+            if user is not None:
+                query = query.filter(VideoProject.owner == user)
+            project = query.first()
+            if not project:
+                raise HTTPException(404, "Project not found")
+                
+            db.query(VideoClip).filter(VideoClip.project_id == project_id).update({"project_id": None})
+            
+            db.delete(project)
+            db.commit()
+            return {"success": True, "message": f"Project {project_id} deleted."}
+        finally:
+            db.close()
+
+    # --- ANALYZE PROJECT ---
+    @router.post("/projects/{project_id}/analyze")
+    async def analyze_project_endpoint(project_id: int, request: Request):
+        user = _owner(request)
+        video_service = VideoService()
+        try:
+            result = await video_service.analyze_project(project_id, owner=user)
+            if "error" in result:
+                raise HTTPException(500, result["error"])
+            return result
+        except ValueError as ex:
+            raise HTTPException(404, str(ex))
+        except Exception as e:
+            logger.error(f"Analysis error: {e}")
+            raise HTTPException(500, str(e))
+
+    # --- EDIT PLAN ---
+    @router.post("/projects/{project_id}/edit-plan")
+    async def suggest_edit_plan_endpoint(project_id: int, request: Request):
+        user = _owner(request)
+        video_service = VideoService()
+        try:
+            result = await video_service.suggest_edit_plan(project_id, owner=user)
+            if "error" in result:
+                raise HTTPException(500, result["error"])
+            return result
+        except ValueError as ex:
+            raise HTTPException(404, str(ex))
+        except Exception as e:
+            logger.error(f"Edit plan error: {e}")
+            raise HTTPException(500, str(e))
 
     return router

@@ -21,4 +21,7 @@ Here is what was accomplished recently:
    - Built `/api/video` routes in `routes/video_routes.py` and registered them in `app.py`.
    - Setup project directories (`data/video/*`) in `setup.py`.
    - Created and successfully passed unit tests in `tests/test_video_service.py`.
-
+5. **Step 3 Completed — Content Analysis & Format Recommendation**:
+   - Implemented `analyze_project` and `suggest_edit_plan` in `services/video_service.py` to aggregate transcript/visual content, recommend formats (shorts vs. long), generate YouTube title/description/tags, and outline edit suggestions.
+   - Built project API routes (`POST /projects`, `GET /projects`, `GET /projects/{id}`, `PUT /projects/{id}`, `DELETE /projects/{id}`, and endpoints for project analysis and edit plans) in `routes/video_routes.py`.
+   - Wrote and verified project analysis and edit plan unit tests in `tests/test_video_service.py`.
