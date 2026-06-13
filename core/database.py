@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text, Float
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 from sqlalchemy.orm import relationship, sessionmaker, backref
@@ -1410,6 +1410,114 @@ class Integration(TimestampMixin, Base):
     type   = Column(String, nullable=False)  # "email", "rss", "webhook"
     config = Column(JSON, nullable=True)     # type-specific config
     enabled = Column(Boolean, default=True)
+
+
+class VideoProject(TimestampMixin, Base):
+    """A project wrapping one or more clips into a publishable video."""
+    __tablename__ = "video_projects"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    owner = Column(String, nullable=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String, default="draft")  # draft, analyzing, editing, rendering, ready, published, failed
+    format_recommendation = Column(String, nullable=True)  # short, long, both
+    format_reasoning = Column(Text, nullable=True)
+    output_path = Column(String, nullable=True)
+    youtube_video_id = Column(String, nullable=True)
+    publish_settings = Column(JSON, nullable=True)  # {title, description, tags, privacy, category, thumbnail}
+    
+    clips = relationship("VideoClip", back_populates="project", cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "owner": self.owner,
+            "title": self.title,
+            "description": self.description,
+            "status": self.status,
+            "format_recommendation": self.format_recommendation,
+            "format_reasoning": self.format_reasoning,
+            "output_path": self.output_path,
+            "youtube_video_id": self.youtube_video_id,
+            "publish_settings": self.publish_settings,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class VideoClip(TimestampMixin, Base):
+    """A source clip belonging to a project."""
+    __tablename__ = "video_clips"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("video_projects.id"), nullable=True)
+    owner = Column(String, nullable=True, index=True)
+    file_path = Column(String, nullable=False)
+    file_name = Column(String, nullable=False)
+    duration_seconds = Column(Float, nullable=True)
+    resolution = Column(String, nullable=True)
+    fps = Column(Float, nullable=True)
+    has_audio = Column(Boolean, nullable=True, default=True)
+    transcript = Column(Text, nullable=True)
+    transcript_segments = Column(JSON, nullable=True)  # list of timestamped segments
+    visual_summary = Column(Text, nullable=True)
+    scene_descriptions = Column(JSON, nullable=True)
+    position = Column(Integer, nullable=True, default=0)
+    trim_start = Column(Float, nullable=True, default=0.0)
+    trim_end = Column(Float, nullable=True, default=0.0)
+
+    project = relationship("VideoProject", back_populates="clips")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "owner": self.owner,
+            "file_path": self.file_path,
+            "file_name": self.file_name,
+            "duration_seconds": self.duration_seconds,
+            "resolution": self.resolution,
+            "fps": self.fps,
+            "has_audio": self.has_audio,
+            "transcript": self.transcript,
+            "transcript_segments": self.transcript_segments,
+            "visual_summary": self.visual_summary,
+            "scene_descriptions": self.scene_descriptions,
+            "position": self.position,
+            "trim_start": self.trim_start,
+            "trim_end": self.trim_end,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class YouTubeAccount(TimestampMixin, Base):
+    """OAuth credentials for YouTube publishing."""
+    __tablename__ = "youtube_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    owner = Column(String, nullable=True, index=True)
+    channel_name = Column(String, nullable=True)
+    channel_id = Column(String, nullable=True)
+    access_token = Column(EncryptedText, nullable=True)
+    refresh_token = Column(EncryptedText, nullable=True)
+    token_expiry = Column(DateTime, nullable=True)
+    client_id = Column(String, nullable=True)
+    client_secret = Column(EncryptedText, nullable=True)
+    is_enabled = Column(Boolean, default=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "owner": self.owner,
+            "channel_name": self.channel_name,
+            "channel_id": self.channel_id,
+            "token_expiry": self.token_expiry.isoformat() if self.token_expiry else None,
+            "client_id": self.client_id,
+            "is_enabled": self.is_enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
 
 
 

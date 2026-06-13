@@ -13,12 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     curl \
     git \
+    ffmpeg \
     nodejs \
     npm \
     tmux \
     openssh-client \
     gosu \
     && rm -rf /var/lib/apt/lists/*
+
 
 WORKDIR /app
 

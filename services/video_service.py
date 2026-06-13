@@ -1,0 +1,323 @@
+import os
+import logging
+import asyncio
+import json
+import base64
+from typing import List, Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+# Lazy imports/availabilities
+WHISPER_AVAILABLE = False
+MOVIEPY_AVAILABLE = False
+OPENCV_AVAILABLE = False
+
+def check_dependencies():
+    global WHISPER_AVAILABLE, MOVIEPY_AVAILABLE, OPENCV_AVAILABLE
+    try:
+        from faster_whisper import WhisperModel
+        WHISPER_AVAILABLE = True
+    except ImportError:
+        WHISPER_AVAILABLE = False
+        logger.warning("faster-whisper not installed; transcription will be unavailable.")
+
+    try:
+        import moviepy
+        MOVIEPY_AVAILABLE = True
+    except ImportError:
+        MOVIEPY_AVAILABLE = False
+        logger.warning("moviepy not installed; video metadata extraction and editing will be unavailable.")
+
+    try:
+        import cv2
+        OPENCV_AVAILABLE = True
+    except ImportError:
+        OPENCV_AVAILABLE = False
+        logger.warning("opencv-python not installed; keyframe extraction will be unavailable.")
+
+# Initialize status
+check_dependencies()
+
+def parse_llm_json(response_text: str) -> dict:
+    """Parse JSON robustly from LLM response text.
+    Handles thinking tokens, markdown formatting, and extracts JSON content.
+    """
+    from src.text_helpers import strip_think
+    import re
+    
+    # 1. Strip reasoning/thinking tokens
+    cleaned = strip_think(response_text or "", prose=False, prompt_echo=False).strip()
+    
+    # 2. Clean standard markdown fence blocks
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+    
+    # 3. Try to parse directly
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    
+    # 4. Fallback: Search for the first { or [ and last } or ]
+    match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", cleaned)
+    if match:
+        json_str = match.group(0)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+            
+    # 5. Last resort fallback
+    logger.warning(f"Failed to parse JSON from LLM output: {response_text[:300]}...")
+    return {}
+
+
+class VideoService:
+    """Service to handle video metadata extraction, audio transcription, keyframe extraction, and content analysis."""
+    
+    def __init__(self, data_dir: str = "data"):
+        self.data_dir = data_dir
+        self.upload_dir = os.path.join(data_dir, "video", "uploads")
+        self.keyframe_dir = os.path.join(data_dir, "video", "keyframes")
+        self.render_dir = os.path.join(data_dir, "video", "renders")
+        
+        # Ensure directories exist
+        os.makedirs(self.upload_dir, exist_ok=True)
+        os.makedirs(self.keyframe_dir, exist_ok=True)
+        os.makedirs(self.render_dir, exist_ok=True)
+
+    def get_video_metadata_sync(self, clip_path: str) -> dict:
+        if not MOVIEPY_AVAILABLE:
+            raise ImportError("moviepy is not installed. Please install moviepy.")
+        
+        from moviepy.video.io.VideoFileClip import VideoFileClip
+        
+        try:
+            clip = VideoFileClip(clip_path)
+            metadata = {
+                "duration": float(clip.duration),
+                "width": int(clip.size[0]),
+                "height": int(clip.size[1]),
+                "fps": float(clip.fps) if clip.fps else 0.0,
+                "has_audio": clip.audio is not None,
+            }
+            clip.close()
+            return metadata
+        except Exception as e:
+            logger.error(f"Failed to read video metadata for {clip_path}: {e}")
+            raise ValueError(f"Failed to read video metadata: {str(e)}")
+
+    async def get_video_metadata(self, clip_path: str) -> dict:
+        return await asyncio.to_thread(self.get_video_metadata_sync, clip_path)
+
+    def extract_audio_sync(self, clip_path: str, output_path: str) -> str:
+        if not MOVIEPY_AVAILABLE:
+            raise ImportError("moviepy is not installed. Please install moviepy.")
+        
+        from moviepy.video.io.VideoFileClip import VideoFileClip
+        
+        try:
+            clip = VideoFileClip(clip_path)
+            if clip.audio is None:
+                clip.close()
+                raise ValueError("Video clip does not contain any audio track.")
+            
+            clip.audio.write_audiofile(output_path, logger=None)
+            clip.close()
+            return output_path
+        except Exception as e:
+            logger.error(f"Failed to extract audio from {clip_path}: {e}")
+            raise ValueError(f"Failed to extract audio: {str(e)}")
+
+    async def extract_audio(self, clip_path: str, output_path: str) -> str:
+        return await asyncio.to_thread(self.extract_audio_sync, clip_path, output_path)
+
+    def transcribe_audio_sync(self, audio_path: str, model_size: str = "base") -> dict:
+        if not WHISPER_AVAILABLE:
+            raise ImportError("faster-whisper is not installed. Please install faster-whisper.")
+        
+        from faster_whisper import WhisperModel
+        
+        try:
+            # Safe CPU run defaults
+            model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            segments, info = model.transcribe(audio_path, beam_size=5)
+            
+            formatted_segments = []
+            for segment in segments:
+                formatted_segments.append({
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": segment.text.strip(),
+                    "timestamp": f"{int(segment.start // 60):02d}:{int(segment.start % 60):02d}",
+                })
+                
+            full_text = " ".join(seg["text"] for seg in formatted_segments)
+            
+            return {
+                "success": True,
+                "transcript": full_text,
+                "segments": formatted_segments,
+                "language": info.language,
+                "language_probability": info.language_probability,
+            }
+        except Exception as e:
+            logger.error(f"Whisper transcription failed: {e}")
+            raise ValueError(f"Transcription failed: {str(e)}")
+
+    async def transcribe_audio(self, audio_path: str, model_size: str = "base") -> dict:
+        return await asyncio.to_thread(self.transcribe_audio_sync, audio_path, model_size)
+
+    def extract_keyframes_sync(self, clip_path: str, output_dir: str, interval_sec: float = 2.0) -> List[str]:
+        if not OPENCV_AVAILABLE:
+            raise ImportError("opencv-python is not installed. Please install opencv-python.")
+        
+        import cv2
+        
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            cap = cv2.VideoCapture(clip_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0:
+                fps = 30.0
+            
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_interval = int(fps * interval_sec)
+            if frame_interval <= 0:
+                frame_interval = 1
+            
+            keyframe_paths = []
+            frame_idx = 0
+            
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                if frame_idx % frame_interval == 0:
+                    sec = frame_idx / fps
+                    filename = f"keyframe_{int(sec):04d}s.jpg"
+                    filepath = os.path.join(output_dir, filename)
+                    cv2.imwrite(filepath, frame)
+                    # Use absolute path or relative to workspace root
+                    keyframe_paths.append(os.path.abspath(filepath))
+                    
+                frame_idx += 1
+                
+            cap.release()
+            return keyframe_paths
+        except Exception as e:
+            logger.error(f"Failed to extract keyframes from {clip_path}: {e}")
+            raise ValueError(f"Keyframe extraction failed: {str(e)}")
+
+    async def extract_keyframes(self, clip_path: str, output_dir: str, interval_sec: float = 2.0) -> List[str]:
+        return await asyncio.to_thread(self.extract_keyframes_sync, clip_path, output_dir, interval_sec)
+
+    async def generate_visual_summary(self, keyframe_paths: List[str], owner: str = None) -> str:
+        """Send keyframes to the configured LLM for visual summary.
+        If the model doesn't support vision, or the call fails, falls back gracefully to a text-only summary.
+        """
+        from src.endpoint_resolver import resolve_endpoint
+        from src.llm_core import llm_call_async
+        
+        # 1. Resolve model endpoint
+        url, model, headers = resolve_endpoint("vision", owner=owner)
+        if not url or not model:
+            url, model, headers = resolve_endpoint("default", owner=owner)
+            
+        if not url or not model:
+            logger.warning("No LLM endpoint resolved for visual summary.")
+            return "No visual summary available (LLM endpoint not configured)."
+            
+        content = [{"type": "text", "text": "Describe the visual contents of this video based on these keyframes extracted at regular intervals. Provide a cohesive summary of the scene, setting, subjects, and pacing. Keep it under 200 words."}]
+        
+        sampled_keyframes = keyframe_paths[:5] if len(keyframe_paths) > 5 else keyframe_paths
+        
+        for kp in sampled_keyframes:
+            if not os.path.exists(kp):
+                continue
+            try:
+                with open(kp, "rb") as image_file:
+                    encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encoded_string}"
+                    }
+                })
+            except Exception as e:
+                logger.warning(f"Failed to read/encode keyframe {kp}: {e}")
+                
+        try:
+            messages = [{"role": "user", "content": content}]
+            response = await llm_call_async(
+                url=url,
+                model=model,
+                messages=messages,
+                headers=headers,
+                temperature=0.3,
+                max_tokens=500,
+                timeout=60
+            )
+            if response:
+                from src.text_helpers import strip_think
+                return strip_think(response).strip()
+        except Exception as e:
+            logger.warning(f"Multimodal vision call failed (likely model does not support image inputs): {e}")
+            
+        return "Visual summary unavailable (Multimodal analysis not supported by the current model configuration)."
+
+    async def analyze_content_format(self, transcript: str, duration: float, owner: str = None) -> dict:
+        """Ask the LLM to recommend short-form vs long-form vs both, with reasoning."""
+        from src.endpoint_resolver import resolve_endpoint
+        from src.llm_core import llm_call_async
+        
+        url, model, headers = resolve_endpoint("utility", owner=owner)
+        if not url or not model:
+            url, model, headers = resolve_endpoint("default", owner=owner)
+            
+        if not url or not model:
+            return {
+                "format": "long",
+                "reasoning": "Fallback default: No LLM configured."
+            }
+            
+        truncated_transcript = transcript[:8000] + "... [truncated]" if len(transcript) > 8000 else transcript
+        
+        prompt = (
+            "You are an expert video producer and AI content strategist.\n"
+            "Analyze the following video details and recommend whether this content is best suited for:\n"
+            "- 'short' (under 60s vertical format, e.g. Shorts/TikTok/Reels)\n"
+            "- 'long' (traditional horizontal format)\n"
+            "- 'both' (can be publishable as both)\n\n"
+            f"Video Duration: {duration:.1f} seconds\n"
+            f"Transcript:\n{truncated_transcript}\n\n"
+            "Return ONLY raw JSON in the following format (no extra keys, no markdown wrappers):\n"
+            '{"format": "short|long|both", "reasoning": "detailed explanation of why"}'
+        )
+        
+        try:
+            response = await llm_call_async(
+                url=url,
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                headers=headers,
+                temperature=0.1,
+                max_tokens=500,
+                timeout=60
+            )
+            
+            parsed = parse_llm_json(response)
+            if parsed and "format" in parsed:
+                return parsed
+        except Exception as e:
+            logger.error(f"Format analysis failed: {e}")
+            
+        # Fallback default
+        recommended = "long"
+        if duration < 60.0:
+            recommended = "short"
+            
+        return {
+            "format": recommended,
+            "reasoning": f"Fallback default recommendation based on duration of {duration:.1f} seconds."
+        }
