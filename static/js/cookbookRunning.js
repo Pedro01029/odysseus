@@ -980,10 +980,11 @@ function _parseServeCmdToFields(cmd) {
   if (!cmd) return null;
   const ex = (re) => { const m = cmd.match(re); return m ? m[1] : ''; };
   const fields = {
-    backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp'
+    backend: cmd.includes('llama-server-turboquant') ? 'llamacpp_turboquant'
+      : (cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp'
       : cmd.includes('diffusion_server') ? 'diffusers'
       : cmd.includes('sglang') ? 'sglang'
-      : cmd.includes('ollama') ? 'ollama' : 'vllm',
+      : cmd.includes('ollama') ? 'ollama' : 'vllm'),
     port: ex(/--port\s+(\d+)/) || '8000',
     tp: ex(/--tensor-parallel-size\s+(\d+)/) || '1',
     ctx: ex(/--max-model-len\s+(\d+)/) || ex(/--n_ctx\s+(\d+)/) || ex(/-c\s+(\d+)/) || '8192',

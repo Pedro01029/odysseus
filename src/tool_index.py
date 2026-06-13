@@ -32,6 +32,7 @@ ALWAYS_AVAILABLE = frozenset({
     # Keeping the always-on set small leaves room in the ~16-tool
     # budget for manage_tasks / manage_calendar / etc.
     "list_served_models", "stop_served_model",
+    "list_mcp_resources", "read_mcp_resource",
     # Generic API loopback — the catch-all when no named tool fits.
     "app_api",
 })
@@ -80,6 +81,8 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_tasks": "Scheduled task management: list, create, edit, delete, pause, resume, or run cron tasks.",
     "manage_endpoints": "Endpoint management: list, add, delete, enable, or disable model API endpoints.",
     "manage_mcp": "MCP server management: list, add, delete, reconnect servers, or list available tools.",
+    "list_mcp_resources": "List all resources (documents, reference guides, schema files, data sources) exposed by connected MCP servers.",
+    "read_mcp_resource": "Read the contents of a specific MCP resource using its resource URI.",
     "manage_webhooks": "Webhook management: list, add, delete, enable, or disable webhooks.",
     "manage_tokens": "API token management: list, create, or delete API access tokens.",
     "manage_documents": "List, read, delete, or tidy documents in the editor panel. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content. action='delete' with document_id removes a doc (only way to delete). Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",

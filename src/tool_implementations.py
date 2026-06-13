@@ -1102,17 +1102,26 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
         import uuid as _uuid
         from datetime import datetime
         name = args.get("name", "")
+        transport = args.get("transport", "stdio")
         command = args.get("command", "")
         cmd_args = args.get("args", [])
         env = args.get("env", {})
-        if not name or not command:
-            return {"error": "name and command are required", "exit_code": 1}
+        url = args.get("url", "")
+
+        if transport == "sse":
+            if not name or not url:
+                return {"error": "name and url are required for sse transport", "exit_code": 1}
+        else:
+            if not name or not command:
+                return {"error": "name and command are required for stdio transport", "exit_code": 1}
+
         sid = str(_uuid.uuid4())[:8]
         db = SessionLocal()
         try:
-            srv = McpServer(id=sid, name=name, transport="stdio", command=command,
-                            args=json.dumps(cmd_args) if isinstance(cmd_args, list) else cmd_args,
-                            env=json.dumps(env) if isinstance(env, dict) else env,
+            srv = McpServer(id=sid, name=name, transport=transport, command=command if transport == "stdio" else None,
+                            args=json.dumps(cmd_args) if isinstance(cmd_args, list) and transport == "stdio" else (cmd_args if transport == "stdio" else None),
+                            env=json.dumps(env) if isinstance(env, dict) and transport == "stdio" else (env if transport == "stdio" else None),
+                            url=url if transport == "sse" else None,
                             is_enabled=True, created_at=datetime.utcnow(), updated_at=datetime.utcnow())
             db.add(srv)
             db.commit()
@@ -1123,11 +1132,16 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
         tool_count = 0
         if mcp:
             try:
-                await mcp.connect_server(
-                    sid, name, "stdio", command=command,
-                    args=cmd_args if isinstance(cmd_args, list) else json.loads(cmd_args),
-                    env=env if isinstance(env, dict) else json.loads(env),
-                )
+                if transport == "sse":
+                    await mcp.connect_server(
+                        sid, name, "sse", url=url
+                    )
+                else:
+                    await mcp.connect_server(
+                        sid, name, "stdio", command=command,
+                        args=cmd_args if isinstance(cmd_args, list) else json.loads(cmd_args),
+                        env=env if isinstance(env, dict) else json.loads(env),
+                    )
                 st = mcp.get_server_status(sid)
                 tool_count = st.get("tool_count", 0)
             except Exception as e:
@@ -1201,6 +1215,113 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
 
     else:
         return {"error": f"Unknown action: {action}", "exit_code": 1}
+
+
+async def do_list_mcp_resources(content: str, owner: Optional[str] = None) -> Dict:
+    """List all available resources across connected MCP servers."""
+    try:
+        args = _parse_tool_args(content) if content.strip() else {}
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+
+    mcp = get_mcp_manager()
+    if not mcp:
+        return {"response": "No MCP manager available", "resources": [], "exit_code": 0}
+
+    filter_sid = args.get("server_id")
+    target_servers = []
+    if filter_sid:
+        target_servers = [filter_sid]
+    else:
+        target_servers = list(mcp._sessions.keys())
+
+    all_resources = []
+    for sid in target_servers:
+        conn = mcp._connections.get(sid, {})
+        server_name = conn.get("name", sid)
+        try:
+            resources = await mcp.list_resources(sid)
+            for r in resources:
+                r["server_id"] = sid
+                r["server_name"] = server_name
+                all_resources.append(r)
+        except Exception as e:
+            logger.warning(f"Failed to list resources for MCP server {server_name}: {e}")
+
+    if not all_resources:
+        return {"output": "No MCP resources found.", "resources": [], "exit_code": 0}
+
+    lines = [f"Found {len(all_resources)} MCP resource(s):"]
+    for r in all_resources:
+        desc = f" - {r.get('description', '')}" if r.get("description") else ""
+        lines.append(f"- **{r.get('name', 'Unnamed')}** (URI: `{r.get('uri')}`){desc} [Server: {r.get('server_name')}]")
+
+    return {"output": "\n".join(lines), "resources": all_resources, "exit_code": 0}
+
+
+async def do_read_mcp_resource(content: str, owner: Optional[str] = None) -> Dict:
+    """Read contents of an MCP resource by URI."""
+    try:
+        args = _parse_tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+
+    uri = args.get("uri")
+    if not uri:
+        return {"error": "uri is required", "exit_code": 1}
+
+    mcp = get_mcp_manager()
+    if not mcp:
+        return {"error": "No MCP manager available", "exit_code": 1}
+
+    # Find which connected server exposes this URI
+    target_server_id = None
+    uri_lower = uri.lower()
+
+    # 1. Try name/protocol matching heuristic
+    for sid, conn in mcp._connections.items():
+        name_lower = conn.get("name", "").lower()
+        if not name_lower:
+            continue
+        # Direct check
+        if name_lower in uri_lower or uri_lower.startswith(name_lower + "://"):
+            target_server_id = sid
+            break
+        # Split word check (e.g. "cortex-xsoar" -> ["cortex", "xsoar"])
+        words = re.split(r'[-_]', name_lower)
+        if any(w and (w in uri_lower or uri_lower.startswith(w + "://")) for w in words):
+            target_server_id = sid
+            break
+
+    # 2. Search connected servers' listed resources as fallback
+    if not target_server_id:
+        for sid in list(mcp._sessions.keys()):
+            try:
+                resources = await mcp.list_resources(sid)
+                if any(r.get("uri") == uri for r in resources):
+                    target_server_id = sid
+                    break
+            except Exception:
+                continue
+
+    # 3. Try reading from all active servers directly as ultimate fallback
+    if not target_server_id:
+        for sid in list(mcp._sessions.keys()):
+            try:
+                text_content = await mcp.read_resource(sid, uri)
+                if text_content:
+                    return {"output": text_content, "uri": uri, "exit_code": 0}
+            except Exception:
+                continue
+
+    if not target_server_id:
+        return {"error": f"Resource URI not found on any connected MCP server: {uri}", "exit_code": 1}
+
+    try:
+        text_content = await mcp.read_resource(target_server_id, uri)
+        return {"output": text_content, "uri": uri, "exit_code": 0}
+    except Exception as e:
+        return {"error": f"Failed to read resource: {e}", "exit_code": 1}
 
 
 # ---------------------------------------------------------------------------

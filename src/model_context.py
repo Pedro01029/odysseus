@@ -269,8 +269,7 @@ def _query_context_length(endpoint_url: str, model: str) -> int:
 def estimate_tokens(messages: List[Dict]) -> int:
     """Rough token estimate for a list of messages.
 
-    Uses chars * 0.3 which is closer to real BPE tokenizer output
-    than the commonly-cited chars/4 (which underestimates by ~20-30%).
+    Uses chars * 0.3-0.4 depending on content type (JSON/code tokenizes denser).
     Also adds ~4 tokens per message for role/formatting overhead.
     """
     total = 0
@@ -278,9 +277,12 @@ def estimate_tokens(messages: List[Dict]) -> int:
         total += 4  # per-message overhead (role, separators)
         content = msg.get("content", "")
         if isinstance(content, str):
-            total += int(len(content) * 0.3)
+            factor = 0.40 if ("{" in content or "[" in content or "```" in content) else 0.32
+            total += int(len(content) * factor)
         elif isinstance(content, list):
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text":
-                    total += int(len(item.get("text", "")) * 0.3)
+                    text = item.get("text", "")
+                    factor = 0.40 if ("{" in text or "[" in text or "```" in text) else 0.32
+                    total += int(len(text) * factor)
     return total

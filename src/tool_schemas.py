@@ -1020,7 +1020,35 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_mcp_resources",
+            "description": "List all resources (documents, reference guides, schema files, data sources) exposed by connected MCP servers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server_id": {"type": "string", "description": "Optional: Filter resources to a specific MCP server ID"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_mcp_resource",
+            "description": "Read the contents of a specific MCP resource using its resource URI.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string", "description": "The full qualified resource URI (e.g. 'xsoar://docs/xsoar_developer_reference.md')"}
+                },
+                "required": ["uri"]
+            }
+        }
+    },
 ]
+
 
 
 # ---------------------------------------------------------------------------

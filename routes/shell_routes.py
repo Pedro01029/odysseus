@@ -891,9 +891,10 @@ def setup_shell_routes() -> APIRouter:
                     else:
                         importlib_metadata.version(pkg["name"].replace("_", "-"))
                         pkg["installed"] = True
-                except ImportError:
+                except (ImportError, importlib_metadata.PackageNotFoundError):
                     pkg["installed"] = False
-                except importlib_metadata.PackageNotFoundError:
+                except Exception as e:
+                    logger.warning(f"Error checking package {pkg['name']}: {e}")
                     pkg["installed"] = False
 
             if pkg["name"] == "docker":

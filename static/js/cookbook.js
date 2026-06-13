@@ -227,6 +227,7 @@ function _detectModelOptimizations(modelName) {
 export function _detectToolParser(modelName) {
   const n = (modelName || '').toLowerCase();
   if (n.includes('qwen3') && n.includes('coder')) return 'qwen3_coder';
+  if (n.includes('qwen2.5') || n.includes('qwen2')) return 'hermes';
   if (n.includes('qwen')) return 'qwen3_xml';
   if (n.includes('llama-4') || n.includes('llama4')) return 'llama4_json';
   if (n.includes('llama') || n.includes('nemotron')) return 'llama3_json';
@@ -377,7 +378,7 @@ export function _buildServeCmd(f, modelName, backend) {
     if (f.trust_remote) cmd += ' --trust-remote-code';
     if (!f.prefix_cache) cmd += ' --disable-radix-cache';
     if (f.enforce_eager) cmd += ' --disable-cuda-graph';
-  } else if (backend === 'llamacpp') {
+  } else if (backend === 'llamacpp' || backend === 'llamacpp_turboquant') {
     const ggufPath = f._gguf_path || 'model.gguf';
     const gpuId = f.gpu_id?.trim() || '';
     const py = _isWindows() ? 'python' : 'python3';
@@ -399,12 +400,17 @@ export function _buildServeCmd(f, modelName, backend) {
     // renders modern GGUF chat templates that the Python bindings' Jinja2
     // rejects (do_tojson ensure_ascii). Fall back to llama_cpp.server.
     // Don't suppress stderr — surface real errors (missing file, lib, OOM).
+    const isTurbo = backend === 'llamacpp_turboquant';
+    const binaryName = isTurbo ? 'LD_LIBRARY_PATH="/app/.local/bin/turboquant:$LD_LIBRARY_PATH" llama-server-turboquant' : 'llama-server';
+    const extraFlags = isTurbo ? ' -ctk turbo4 -ctv turbo4 -fa 1' : '';
     const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}`;
     if (_isWindows()) {
       cmd += _lcpServer;
     } else {
-      cmd += `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}`;
-      cmd += ` || ${_lcpServer}`;
+      cmd += `${lcPrefix}${binaryName} --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}${extraFlags}`;
+      if (!isTurbo) {
+        cmd += ` || ${_lcpServer}`;
+      }
     }
   } else if (backend === 'ollama') {
     const ollamaName = modelName.split('/').pop().toLowerCase().replace(/[-_]gguf$/i, '');

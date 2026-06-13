@@ -889,6 +889,10 @@ def setup_cookbook_routes() -> APIRouter:
             # shell resolves the bundled python3/hf, mirroring the download flow.
             if not remote:
                 runner_lines.append(_local_tooling_path_export(sys.executable))
+                runner_lines.append("export LD_LIBRARY_PATH='/app/cuda-libs':/app/.local/bin:/app/.local/lib:$LD_LIBRARY_PATH")
+                runner_lines.append('for _cudir in "$HOME"/.local/lib/python*/site-packages/nvidia/*/lib /app/.local/lib/python*/site-packages/nvidia/*/lib; do')
+                runner_lines.append('  [ -d "$_cudir" ] && export LD_LIBRARY_PATH="$_cudir:$LD_LIBRARY_PATH"')
+                runner_lines.append('done')
             runner_lines.append("export FLASHINFER_DISABLE_VERSION_CHECK=1")
             if req.hf_token:
                 runner_lines.append(f"export HF_TOKEN='{_bash_squote(req.hf_token)}'")
@@ -902,7 +906,7 @@ def setup_cookbook_routes() -> APIRouter:
             # model vLLM has to download will be denied without it.
             runner_lines.append(_HF_TOKEN_STATUS_SNIPPET)
             # Auto-install inference engine if missing
-            if "llama_cpp" in req.cmd or "llama-server" in req.cmd:
+            if "llama_cpp" in req.cmd or "llama-server" in req.cmd or "llama-server-turboquant" in req.cmd:
                 # Prefer the NATIVE llama-server binary — its minja templating
                 # renders modern GGUF chat templates that the Python bindings'
                 # Jinja2 rejects (do_tojson ensure_ascii). Build it once from
@@ -911,68 +915,84 @@ def setup_cookbook_routes() -> APIRouter:
                 # Include the Homebrew bin dirs so a brew-installed llama-server /
                 # ollama is found (otherwise macOS falls back to a slow source build).
                 # /opt/homebrew = Apple Silicon, /usr/local = Intel; harmless on Linux.
-                runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:$HOME/llama.cpp/build/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-                runner_lines.append('if [ -d /data/data/com.termux ]; then')
-                runner_lines.append('  # Termux: no native build — use the Python bindings (CPU).')
-                runner_lines.append('  if ! python3 -c "import llama_cpp" 2>/dev/null; then')
-                runner_lines.append('    pkg install -y cmake 2>/dev/null')
-                runner_lines.append('    pip install numpy diskcache jinja2 2>/dev/null')
-                runner_lines.append('    CMAKE_ARGS="-DGGML_BLAS=OFF -DGGML_LLAMAFILE=OFF" pip install llama-cpp-python --no-build-isolation --no-cache-dir 2>&1 || true')
-                runner_lines.append('  fi')
-                runner_lines.append('elif ! command -v llama-server &>/dev/null; then')
-                runner_lines.append('  echo "Native llama-server not found — building from source (one-time, may take a few minutes)..."')
-                runner_lines.append('  mkdir -p ~/bin')
-                runner_lines.append('  cd ~ && [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp')
-                # Build with the right accelerator: Metal on macOS (llama.cpp
-                # enables it automatically, no flag), CUDA on Linux when present,
-                # else a plain CPU build. nproc is Linux-only — fall back to
-                # `sysctl hw.ncpu` on macOS. (Tip: `brew install llama.cpp` ships
-                # a prebuilt llama-server and skips this whole source build.)
-                runner_lines.append('  NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"')
-                runner_lines.append('  if [ "$(uname -s)" = "Darwin" ]; then')
-                runner_lines.append('    command -v cmake >/dev/null 2>&1 || echo "WARNING: cmake not found — install it with: brew install cmake (or: brew install llama.cpp for a prebuilt llama-server)."')
-                # Start from a clean cache: a prior failed configure (e.g. a CUDA
-                # attempt) poisons build/CMakeCache.txt, so a plain `cmake -B build`
-                # would reuse the bad settings and fail again. CMAKE_BUILD_TYPE is
-                # explicit so the binary is optimized (Metal auto-enables on macOS).
-                runner_lines.append('    cd ~/llama.cpp && rm -rf build && cmake -B build -DCMAKE_BUILD_TYPE=Release \\')
-                runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
-                runner_lines.append('      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
-                runner_lines.append('  else')
-                # Detect pip-installed nvcc (from vLLM/nvidia CUDA wheels) and put
-                # it on PATH so cmake's CUDA configure can find it.  We check the
-                # same three layouts as entrypoint.sh:
-                #   nvidia/cu13       — nvidia-nvcc-cu13
-                #   nvidia/cu12       — nvidia-nvcc-cu12
-                #   nvidia/cuda_nvcc  — nvidia-cuda-nvcc-cu12 (sub-package style)
-                runner_lines.append('    for _cudir in ~/.local/lib/python*/site-packages/nvidia/cu13 ~/.local/lib/python*/site-packages/nvidia/cu12 ~/.local/lib/python*/site-packages/nvidia/cuda_nvcc; do')
-                runner_lines.append('      [ -x "$_cudir/bin/nvcc" ] && export CUDA_HOME="$_cudir" && export PATH="$_cudir/bin:$PATH" && break')
-                runner_lines.append('    done')
-                # rm -rf build so a prior poisoned CMakeCache.txt (e.g. from a
-                # failed CUDA attempt) doesn't cause the next configure to reuse
-                # stale settings and silently produce a CPU-only binary.
-                runner_lines.append('    cd ~/llama.cpp && rm -rf build')
-                runner_lines.append('    if command -v nvcc &>/dev/null; then')
-                runner_lines.append('      echo "[odysseus] CUDA nvcc found — building llama-server with CUDA (GPU) support..."')
-                runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \\')
-                runner_lines.append('        && cmake --build build -j"$NPROC" --target llama-server \\')
-                runner_lines.append('        && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
-                runner_lines.append('    else')
-                runner_lines.append('      echo "[odysseus] WARNING: nvcc not found — building llama-server for CPU only."')
-                runner_lines.append('      echo "[odysseus]   GPU inference will not be available for this llama.cpp build."')
-                runner_lines.append('      echo "[odysseus]   To get a GPU build, first install vLLM via Cookbook -> Dependencies"')
-                runner_lines.append('      echo "[odysseus]   (its CUDA wheels include nvcc), then re-launch this serve task."')
-                runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release \\')
-                runner_lines.append('        && cmake --build build -j"$NPROC" --target llama-server \\')
-                runner_lines.append('        && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
-                runner_lines.append('    fi')
-                runner_lines.append('  fi')
-                runner_lines.append('  # If the native build failed, fall back to the Python bindings.')
-                runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
-                runner_lines.append('    echo "llama-server build failed — installing Python bindings as fallback..."')
-                runner_lines.append('    pip install --user --break-system-packages -q llama-cpp-python 2>/dev/null || pip install -q llama-cpp-python 2>/dev/null || true')
-                runner_lines.append('  fi')
-                runner_lines.append('fi')
+                runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:$HOME/llama.cpp/build/bin:/app/bin:/app/.local/bin:/app/.local/bin/turboquant:/opt/homebrew/bin:/usr/local/bin:$PATH"')
+                if "llama-server-turboquant" in req.cmd:
+                    runner_lines.append('if ! command -v llama-server-turboquant &>/dev/null; then')
+                    runner_lines.append('  echo "Native llama-server-turboquant not found — building from source (one-time, may take a few minutes)..."')
+                    runner_lines.append('  mkdir -p ~/bin')
+                    runner_lines.append('  cd ~ && [ -d llama.cpp-turboquant ] || git clone -b feature/turboquant-kv-cache --depth 1 https://github.com/TheTom/llama-cpp-turboquant llama.cpp-turboquant')
+                    runner_lines.append('  NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"')
+                    runner_lines.append('  for _cudir in ~/.local/lib/python*/site-packages/nvidia/cu13 ~/.local/lib/python*/site-packages/nvidia/cu12 ~/.local/lib/python*/site-packages/nvidia/cuda_nvcc /app/.local/lib/python*/site-packages/nvidia/cu13 /app/.local/lib/python*/site-packages/nvidia/cu12 /app/.local/lib/python*/site-packages/nvidia/cuda_nvcc; do')
+                    runner_lines.append('    [ -x "$_cudir/bin/nvcc" ] && export CUDA_HOME="$_cudir" && export PATH="$_cudir/bin:$PATH" && export LD_LIBRARY_PATH="$_cudir/lib:$LD_LIBRARY_PATH" && export LIBRARY_PATH="$_cudir/lib:$LIBRARY_PATH" && break')
+                    runner_lines.append('  done')
+                    runner_lines.append('  cd ~/llama.cpp-turboquant && rm -rf build')
+                    runner_lines.append('  if command -v nvcc &>/dev/null; then')
+                    runner_lines.append('    echo "[odysseus] CUDA nvcc found — building llama-server-turboquant with CUDA (GPU) support..."')
+                    runner_lines.append('    cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \\')
+                    runner_lines.append('      -DCMAKE_C_FLAGS="-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK" \\')
+                    runner_lines.append('      -DCMAKE_CXX_FLAGS="-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK" \\')
+                    runner_lines.append('      -DCMAKE_CUDA_FLAGS="-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK" \\')
+                    runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
+                    runner_lines.append('      && mkdir -p /app/.local/bin/turboquant && cp ~/llama.cpp-turboquant/build/bin/llama-server ~/llama.cpp-turboquant/build/bin/*.so* /app/.local/bin/turboquant/ \\')
+                    runner_lines.append('      && mv /app/.local/bin/turboquant/llama-server /app/.local/bin/turboquant/llama-server-turboquant \\')
+                    runner_lines.append('      && ln -sf /app/.local/bin/turboquant/llama-server-turboquant ~/bin/llama-server-turboquant')
+                    runner_lines.append('  else')
+                    runner_lines.append('    echo "[odysseus] WARNING: nvcc not found — building llama-server-turboquant for CPU only."')
+                    runner_lines.append('    cmake -B build -DCMAKE_BUILD_TYPE=Release \\')
+                    runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
+                    runner_lines.append('      && mkdir -p /app/.local/bin/turboquant && cp ~/llama.cpp-turboquant/build/bin/llama-server ~/llama.cpp-turboquant/build/bin/*.so* /app/.local/bin/turboquant/ \\')
+                    runner_lines.append('      && mv /app/.local/bin/turboquant/llama-server /app/.local/bin/turboquant/llama-server-turboquant \\')
+                    runner_lines.append('      && ln -sf /app/.local/bin/turboquant/llama-server-turboquant ~/bin/llama-server-turboquant')
+                    runner_lines.append('  fi')
+                    runner_lines.append('fi')
+                else:
+                    runner_lines.append('if [ -d /data/data/com.termux ]; then')
+                    runner_lines.append('  # Termux: no native build — use the Python bindings (CPU).')
+                    runner_lines.append('  if ! python3 -c "import llama_cpp" 2>/dev/null; then')
+                    runner_lines.append('    pkg install -y cmake 2>/dev/null')
+                    runner_lines.append('    pip install numpy diskcache jinja2 2>/dev/null')
+                    runner_lines.append('    CMAKE_ARGS="-DGGML_BLAS=OFF -DGGML_LLAMAFILE=OFF" pip install llama-cpp-python --no-build-isolation --no-cache-dir 2>&1 || true')
+                    runner_lines.append('  fi')
+                    runner_lines.append('elif ! command -v llama-server &>/dev/null; then')
+                    runner_lines.append('  echo "Native llama-server not found — building from source (one-time, may take a few minutes)..."')
+                    runner_lines.append('  mkdir -p ~/bin')
+                    runner_lines.append('  cd ~ && [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp')
+                    runner_lines.append('  NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"')
+                    runner_lines.append('  if [ "$(uname -s)" = "Darwin" ]; then')
+                    runner_lines.append('    command -v cmake >/dev/null 2>&1 || echo "WARNING: cmake not found — install it with: brew install cmake (or: brew install llama.cpp for a prebuilt llama-server)."')
+                    runner_lines.append('    cd ~/llama.cpp && rm -rf build && cmake -B build -DCMAKE_BUILD_TYPE=Release \\')
+                    runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
+                    runner_lines.append('      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
+                    runner_lines.append('  else')
+                    runner_lines.append('    for _cudir in ~/.local/lib/python*/site-packages/nvidia/cu13 ~/.local/lib/python*/site-packages/nvidia/cu12 ~/.local/lib/python*/site-packages/nvidia/cuda_nvcc /app/.local/lib/python*/site-packages/nvidia/cu13 /app/.local/lib/python*/site-packages/nvidia/cu12 /app/.local/lib/python*/site-packages/nvidia/cuda_nvcc; do')
+                    runner_lines.append('      [ -x "$_cudir/bin/nvcc" ] && export CUDA_HOME="$_cudir" && export PATH="$_cudir/bin:$PATH" && export LD_LIBRARY_PATH="$_cudir/lib:$LD_LIBRARY_PATH" && export LIBRARY_PATH="$_cudir/lib:$LIBRARY_PATH" && break')
+                    runner_lines.append('    done')
+                    runner_lines.append('    cd ~/llama.cpp && rm -rf build')
+                    runner_lines.append('    if command -v nvcc &>/dev/null; then')
+                    runner_lines.append('      echo "[odysseus] CUDA nvcc found — building llama-server with CUDA (GPU) support..."')
+                    runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \\')
+                    runner_lines.append('        -DCMAKE_C_FLAGS="-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK" \\')
+                    runner_lines.append('        -DCMAKE_CXX_FLAGS="-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK" \\')
+                    runner_lines.append('        -DCMAKE_CUDA_FLAGS="-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK" \\')
+                    runner_lines.append('        && cmake --build build -j"$NPROC" --target llama-server \\')
+                    runner_lines.append('        && mkdir -p /app/.local/bin && cp ~/llama.cpp/build/bin/llama-server ~/llama.cpp/build/bin/*.so* /app/.local/bin/ \\')
+                    runner_lines.append('        && ln -sf /app/.local/bin/llama-server ~/bin/llama-server')
+                    runner_lines.append('    else')
+                    runner_lines.append('      echo "[odysseus] WARNING: nvcc not found — building llama-server for CPU only."')
+                    runner_lines.append('      echo "[odysseus]   GPU inference will not be available for this llama.cpp build."')
+                    runner_lines.append('      echo "[odysseus]   To get a GPU build, first install vLLM via Cookbook -> Dependencies"')
+                    runner_lines.append('      echo "[odysseus]   (its CUDA wheels include nvcc), then re-launch this serve task."')
+                    runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release \\')
+                    runner_lines.append('        && cmake --build build -j"$NPROC" --target llama-server \\')
+                    runner_lines.append('        && mkdir -p /app/.local/bin && cp ~/llama.cpp/build/bin/llama-server ~/llama.cpp/build/bin/*.so /app/.local/bin/ \\')
+                    runner_lines.append('        && ln -sf /app/.local/bin/llama-server ~/bin/llama-server')
+                    runner_lines.append('    fi')
+                    runner_lines.append('  fi')
+                    runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
+                    runner_lines.append('    echo "llama-server build failed — installing Python bindings as fallback..."')
+                    runner_lines.append('    pip install --user --break-system-packages -q llama-cpp-python 2>/dev/null || pip install -q llama-cpp-python 2>/dev/null || true')
+                    runner_lines.append('  fi')
+                    runner_lines.append('fi')
             elif "ollama" in req.cmd:
                 # Ollama manages its own model store and HTTP server. Just make
                 # sure the binary exists and the daemon is up before running the

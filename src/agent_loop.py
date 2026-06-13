@@ -998,7 +998,7 @@ def _build_base_prompt(
 
     # Inject MCP tool descriptions
     if mcp_mgr:
-        mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
+        mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {}, compact=compact)
         if mcp_desc:
             agent_prompt += mcp_desc
 

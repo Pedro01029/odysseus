@@ -116,8 +116,29 @@ class McpManager:
             from mcp.client.sse import sse_client
             from contextlib import AsyncExitStack
 
+            # Resolve localhost to host.docker.internal when running inside Docker
+            resolved_url = url
+            def is_in_docker() -> bool:
+                if os.path.exists("/.dockerenv"):
+                    return True
+                try:
+                    with open("/proc/1/cgroup", "r", encoding="utf-8", errors="ignore") as f:
+                        cg = f.read()
+                    return any(marker in cg for marker in ("docker", "containerd", "kubepods"))
+                except Exception:
+                    return False
+
+            if is_in_docker():
+                for local_host in ("localhost", "127.0.0.1"):
+                    resolved_url = resolved_url.replace(f"://{local_host}:", "://host.docker.internal:")
+                    resolved_url = resolved_url.replace(f"://{local_host}/", "://host.docker.internal/")
+                    if resolved_url.endswith(f"://{local_host}"):
+                        resolved_url = resolved_url[:-len(local_host)] + "host.docker.internal"
+                if resolved_url != url:
+                    logger.info(f"Resolved local SSE URL {url} to host.docker.internal: {resolved_url}")
+
             stack = AsyncExitStack()
-            transport = await stack.enter_async_context(sse_client(url))
+            transport = await stack.enter_async_context(sse_client(resolved_url))
             read_stream, write_stream = transport
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
 
@@ -192,6 +213,46 @@ class McpManager:
                 )
         finally:
             db.close()
+
+    async def list_resources(self, server_id: str) -> List[Dict[str, Any]]:
+        """List resources exposed by a connected MCP server."""
+        session = self._sessions.get(server_id)
+        if not session:
+            raise ValueError(f"MCP server not connected: {server_id}")
+        try:
+            res = await session.list_resources()
+            out = []
+            for r in getattr(res, "resources", []):
+                out.append({
+                    "uri": getattr(r, "uri", ""),
+                    "name": getattr(r, "name", ""),
+                    "description": getattr(r, "description", "") or "",
+                    "mimeType": getattr(r, "mimeType", "") or "",
+                })
+            return out
+        except Exception as e:
+            logger.error(f"Failed to list resources for server {server_id}: {e}")
+            raise
+
+    async def read_resource(self, server_id: str, uri: str) -> str:
+        """Read content of a resource from a connected MCP server."""
+        session = self._sessions.get(server_id)
+        if not session:
+            raise ValueError(f"MCP server not connected: {server_id}")
+        try:
+            res = await session.read_resource(uri)
+            parts = []
+            for content in getattr(res, "contents", []):
+                if hasattr(content, "text"):
+                    parts.append(content.text)
+                elif hasattr(content, "data") and isinstance(content.data, bytes):
+                    parts.append(content.data.decode("utf-8", errors="replace"))
+                elif hasattr(content, "data"):
+                    parts.append(str(content.data))
+            return "\n".join(parts)
+        except Exception as e:
+            logger.error(f"Failed to read resource {uri} on server {server_id}: {e}")
+            raise
 
     async def call_tool(self, qualified_name: str, arguments: Dict) -> Dict:
         """Call an MCP tool by its qualified name (mcp__{server_id}__{tool_name}).
@@ -366,16 +427,30 @@ class McpManager:
     _cached_prompt_desc = None
     _cached_prompt_desc_key = None
 
-    def get_tool_descriptions_for_prompt(self, disabled_map: Optional[Dict[str, set]] = None) -> str:
+    def get_tool_descriptions_for_prompt(self, disabled_map: Optional[Dict[str, set]] = None, compact: bool = False) -> str:
         """Generate text describing MCP tools for the agent system prompt. Cached."""
-        cache_key = (frozenset((k, frozenset(v)) for k, v in (disabled_map or {}).items()), len(self._tools))
+        cache_key = (frozenset((k, frozenset(v)) for k, v in (disabled_map or {}).items()), len(self._tools), compact)
         if self._cached_prompt_desc is not None and self._cached_prompt_desc_key == cache_key:
             return self._cached_prompt_desc
         tools = self.get_all_tools(disabled_map)
         if not tools:
             return ""
 
-        lines = ["\n\nYou also have access to external MCP tool servers. These tools are called via native function calling:"]
+        if compact:
+            lines = ["\n\nYou also have access to external MCP tool servers. These tools are called via native function calling:"]
+        else:
+            lines = [
+                "\n\nYou also have access to external MCP tool servers. To call one of these tools, write a fenced code block with the qualified tool name (starting with `mcp__`) as the language tag, and pass the arguments as a JSON object inside the block.",
+                "",
+                "Example format:",
+                "```mcp__<server_id>__<tool_name>",
+                "{",
+                '  "param1": "value1"',
+                "}",
+                "```",
+                "",
+                "Available external MCP tools:"
+            ]
         by_server = {}
         for t in tools:
             # Skip builtin Python servers — they're already in the agent prompt

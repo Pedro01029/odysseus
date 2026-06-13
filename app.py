@@ -801,6 +801,31 @@ async def startup_event():
             await register_builtin_servers(mcp_manager)
         except BaseException as e:
             logger.warning(f"Built-in MCP registration failed (non-critical): {type(e).__name__}: {e}")
+        # Auto-seed cortex-xsoar configuration if not present
+        try:
+            from core.database import SessionLocal, McpServer
+            db = SessionLocal()
+            try:
+                xsoar = db.query(McpServer).filter(McpServer.name == "cortex-xsoar").first()
+                if not xsoar:
+                    import uuid
+                    from datetime import datetime
+                    new_srv = McpServer(
+                        id=str(uuid.uuid4())[:8],
+                        name="cortex-xsoar",
+                        transport="sse",
+                        url="http://localhost:8080/sse",
+                        is_enabled=True,
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow()
+                    )
+                    db.add(new_srv)
+                    db.commit()
+                    logger.info("Automatically auto-seeded cortex-xsoar MCP server config in database")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Failed to auto-seed cortex-xsoar server: {e}")
         try:
             await asyncio.wait_for(mcp_manager.connect_all_enabled(), timeout=20)
         except asyncio.TimeoutError:

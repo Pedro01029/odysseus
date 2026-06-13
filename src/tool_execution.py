@@ -551,7 +551,7 @@ async def execute_tool_block(
         do_manage_skills, do_api_call, do_manage_endpoints,
         do_manage_mcp, do_manage_webhooks, do_manage_tokens,
         do_manage_documents, do_manage_settings, do_manage_notes,
-        do_manage_calendar,
+        do_manage_calendar, do_list_mcp_resources, do_read_mcp_resource,
         do_download_model, do_serve_model, do_list_served_models, do_stop_served_model,
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
@@ -687,6 +687,12 @@ async def execute_tool_block(
     elif tool == "manage_mcp":
         desc = "manage_mcp"
         result = await do_manage_mcp(content, owner=owner)
+    elif tool == "list_mcp_resources":
+        desc = "list_mcp_resources"
+        result = await do_list_mcp_resources(content, owner=owner)
+    elif tool == "read_mcp_resource":
+        desc = "read_mcp_resource"
+        result = await do_read_mcp_resource(content, owner=owner)
     elif tool == "manage_webhooks":
         desc = "manage_webhooks"
         result = await do_manage_webhooks(content, owner=owner)
@@ -808,17 +814,17 @@ def format_tool_result(description: str, result: Dict) -> str:
 
     if "stdout" in result:
         if result["stdout"]:
-            parts.append(f"**stdout:**\n```\n{result['stdout']}\n```")
+            parts.append(f"**stdout:**\n```\n{_truncate(result['stdout'])}\n```")
         if result["stderr"]:
-            parts.append(f"**stderr:**\n```\n{result['stderr']}\n```")
+            parts.append(f"**stderr:**\n```\n{_truncate(result['stderr'])}\n```")
         parts.append(f"**exit_code:** {result.get('exit_code', 'unknown')}")
     elif "output" in result:
         # bash / python canonical result shape: {"output": ..., "exit_code": ...}
-        parts.append(f"```\n{result['output']}\n```")
+        parts.append(f"```\n{_truncate(result['output'])}\n```")
         if result.get("exit_code") not in (0, None):
             parts.append(f"**exit_code:** {result['exit_code']}")
     elif "content" in result:
-        parts.append(f"**content ({result.get('size', '?')} chars):**\n```\n{result['content']}\n```")
+        parts.append(f"**content ({result.get('size', '?')} chars):**\n```\n{_truncate(result['content'])}\n```")
     elif "response" in result:
         model = result.get("model", result.get("session_name", ""))
         if model:

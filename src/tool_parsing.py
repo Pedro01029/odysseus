@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Pattern 1: ```bash ... ``` fenced code blocks
 _TOOL_BLOCK_RE = re.compile(
-    r"```(" + "|".join(TOOL_TAGS) + r")\s*\n([\s\S]*?)```",
+    r"```(" + "|".join(TOOL_TAGS) + r"|mcp__[a-zA-Z0-9_]+)\s*\n([\s\S]*?)```",
     re.IGNORECASE,
 )
 
@@ -388,7 +388,93 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
             if block:
                 blocks.append(block)
 
+    # Pattern 5: raw JSON tool calls (like Qwen outputting JSON directly in content)
+    if not blocks:
+        blocks = _parse_raw_json_tool_calls(text)
+
     return blocks
+
+
+def _parse_raw_json_tool_calls(text: str) -> List[ToolBlock]:
+    """Parse raw JSON tool calls of format {"name": "...", "arguments": ...} from text."""
+    blocks = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            nesting = 1
+            j = i + 1
+            while j < len(text) and nesting > 0:
+                if text[j] == '{':
+                    nesting += 1
+                elif text[j] == '}':
+                    nesting -= 1
+                j += 1
+            if nesting == 0:
+                candidate = text[i:j]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        tool_name = parsed.get("name") or parsed.get("tool")
+                        args = parsed.get("arguments") or parsed.get("args") or parsed.get("parameters")
+                        if isinstance(tool_name, str) and tool_name:
+                            is_tool = tool_name.startswith("mcp__") or tool_name in TOOL_TAGS or _TOOL_NAME_MAP.get(tool_name) in TOOL_TAGS
+                            if is_tool:
+                                from src.tool_schemas import function_call_to_tool_block
+                                args_str = json.dumps(args) if isinstance(args, dict) else (str(args) if args is not None else "{}")
+                                block = function_call_to_tool_block(tool_name, args_str)
+                                if block:
+                                    blocks.append(block)
+                                    i = j - 1
+                except Exception:
+                    pass
+        i += 1
+    return blocks
+
+
+def _strip_raw_json_tool_calls(text: str) -> str:
+    """Remove raw JSON tool calls from text."""
+    i = 0
+    ranges_to_remove = []
+    while i < len(text):
+        if text[i] == '{':
+            nesting = 1
+            j = i + 1
+            while j < len(text) and nesting > 0:
+                if text[j] == '{':
+                    nesting += 1
+                elif text[j] == '}':
+                    nesting -= 1
+                j += 1
+            if nesting == 0:
+                candidate = text[i:j]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        tool_name = parsed.get("name") or parsed.get("tool")
+                        if isinstance(tool_name, str) and tool_name:
+                            is_tool = tool_name.startswith("mcp__") or tool_name in TOOL_TAGS or _TOOL_NAME_MAP.get(tool_name) in TOOL_TAGS
+                            if is_tool:
+                                start_idx = i
+                                end_idx = j
+                                # Check if it's wrapped in a code fence, e.g. ```json\n{...}\n```
+                                prefix = text[max(0, start_idx-20):start_idx]
+                                fence_start_match = re.search(r'```(?:json)?\s*$', prefix, re.IGNORECASE)
+                                if fence_start_match:
+                                    start_idx = start_idx - len(prefix) + fence_start_match.start()
+                                    suffix = text[end_idx:end_idx+20]
+                                    fence_end_match = re.match(r'^\s*```', suffix)
+                                    if fence_end_match:
+                                        end_idx = end_idx + fence_end_match.end()
+                                ranges_to_remove.append((start_idx, end_idx))
+                                i = j - 1
+                except Exception:
+                    pass
+        i += 1
+    
+    result = text
+    for start, end in reversed(ranges_to_remove):
+        result = result[:start] + result[end:]
+    return result
 
 
 def strip_tool_blocks(text: str) -> str:
@@ -402,5 +488,6 @@ def strip_tool_blocks(text: str) -> str:
     cleaned = _TOOL_CODE_RE.sub('', cleaned)
     # Strip bare <invoke> blocks not wrapped in <tool_call>
     cleaned = re.sub(r'<invoke\s+name=["\'].*?</invoke>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = _strip_raw_json_tool_calls(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
