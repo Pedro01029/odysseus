@@ -107,6 +107,7 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/model-endpoints", # /probe sub-route also iterates models
     "/api/cookbook/setup",  # remote pacman/apt installs
     "/api/upload",          # large files
+    "/api/video",           # Video Studio uploads, transcription, rendering, AI analysis, publishing
     "/api/image",           # diffusion proxies (inpaint/harmonize/upscale/etc.) — own 120s httpx timeout
 )
 

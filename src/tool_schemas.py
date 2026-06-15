@@ -1081,7 +1081,16 @@ FUNCTION_TOOL_SCHEMAS = [
                         },
                         "description": "List of edit operations (for save_edits/render)"
                     },
-                    "quality": {"type": "string", "enum": ["draft", "high"], "description": "Output rendering quality"}
+                    "quality": {"type": "string", "enum": ["draft", "high"], "description": "Output rendering quality"},
+                    "style_opts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Preferred edit style options (e.g. ['Fast-paced/aggressive cuts', 'Narrative/story-focused flow', 'Highlight reel/best moments only', 'Educational/explainer pacing'])"
+                    },
+                    "custom_prompt": {
+                        "type": "string",
+                        "description": "Custom text prompt instructions to direct the video editing style or content focus"
+                    }
                 },
                 "required": ["action"]
             }

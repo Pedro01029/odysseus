@@ -7,22 +7,28 @@ def test_parse_llm_json():
     # Test reasoning tag stripping
     input_text = "<think>We need to return JSON format</think>```json\n{\"format\": \"short\", \"reasoning\": \"reasons\"}\n```"
     result = parse_llm_json(input_text)
-    assert result == {"format": "short", "reasoning": "reasons"}
+    assert result.get("format") == "short"
+    assert result.get("reasoning") == "reasons"
+    assert result.get("thinking") == "We need to return JSON format"
+    assert result.get("raw_response") == input_text
 
     # Test clean JSON format directly
     input_text = '{"format": "both"}'
     result = parse_llm_json(input_text)
-    assert result == {"format": "both"}
+    assert result.get("format") == "both"
+    assert result.get("raw_response") == input_text
 
     # Test fallback extraction with raw text around JSON
     input_text = "Here is the response:\n{\"format\": \"long\"}\nHope this helps."
     result = parse_llm_json(input_text)
-    assert result == {"format": "long"}
+    assert result.get("format") == "long"
+    assert result.get("raw_response") == input_text
 
     # Test complete failure
     input_text = "This is not json at all."
     result = parse_llm_json(input_text)
-    assert result == {}
+    assert result == {"thinking": "", "raw_response": input_text}
+
 
 
 def test_video_service_init():
@@ -235,4 +241,17 @@ async def test_do_manage_video_tool(mock_session_local):
     result = await do_manage_video('{"action": "get_project", "project_id": 1}')
     assert result["exit_code"] == 0
     assert "Test Proj" in result["response"]
+
+
+def test_clean_transcript_text():
+    from services.video_service import clean_transcript_text
+    
+    # Test Whisper hallucination repetition cleaning
+    input_text = "You You You You You You You You You You You You You You You You You You You You You You You Hey, I got a game to play."
+    assert clean_transcript_text(input_text) == "You Hey, I got a game to play."
+    
+    # Test dot repetition cleaning
+    input_text2 = "Hello. . . . . World."
+    assert clean_transcript_text(input_text2) == "Hello. World."
+
 

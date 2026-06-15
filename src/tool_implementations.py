@@ -4297,7 +4297,7 @@ async def do_manage_video(content: str, owner: Optional[str] = None) -> Dict:
             if not project_id:
                 return {"error": "project_id is required", "exit_code": 1}
             res = await video_service.analyze_project(project_id, owner=owner)
-            if "error" in res:
+            if "error" in res and not res.get("fallback"):
                 return {"error": res["error"], "exit_code": 1}
             return {"response": f"Analysis complete:\nRecommendation: {res.get('format_recommendation')}\nReasoning: {res.get('format_reasoning')}\nSuggested Title: {res.get('suggested_title')}", "exit_code": 0}
             
@@ -4305,8 +4305,15 @@ async def do_manage_video(content: str, owner: Optional[str] = None) -> Dict:
             project_id = args.get("project_id")
             if not project_id:
                 return {"error": "project_id is required", "exit_code": 1}
-            res = await video_service.suggest_edit_plan(project_id, owner=owner)
-            if "error" in res:
+            style_opts = args.get("style_opts", [])
+            custom_prompt = args.get("custom_prompt", None)
+            res = await video_service.suggest_edit_plan(
+                project_id, 
+                owner=owner, 
+                style_opts=style_opts, 
+                custom_prompt=custom_prompt
+            )
+            if "error" in res and not res.get("fallback"):
                 return {"error": res["error"], "exit_code": 1}
             instructions = res.get("edit_instructions", [])
             lines = [f"- {inst.get('action')}: {inst}" for inst in instructions]
@@ -4384,5 +4391,95 @@ async def do_manage_video(content: str, owner: Optional[str] = None) -> Dict:
 
 
 async def do_publish_youtube(content: str, owner: Optional[str] = None) -> Dict:
-    """Placeholder for publish_youtube tool (fully implemented in Step 5)."""
-    return {"response": "YouTube publishing tool is active. Setup Step 5 OAuth first.", "exit_code": 0}
+    """Publish a rendered video project to YouTube."""
+    from core.database import SessionLocal, VideoProject, YouTubeAccount
+    from services.youtube_service import YouTubeService
+    import os
+
+    try:
+        args = _parse_tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+
+    project_id = args.get("project_id")
+    if not project_id:
+        return {"error": "project_id is required", "exit_code": 1}
+
+    account_id = args.get("account_id")
+    title = args.get("title")
+    description = args.get("description")
+    tags = args.get("tags")
+    privacy = args.get("privacy", "unlisted")
+    category = args.get("category", "22")
+
+    db = SessionLocal()
+    yt_service = YouTubeService()
+
+    if not yt_service.is_available():
+        db.close()
+        return {"error": "Google API client libraries are not installed.", "exit_code": 1}
+
+    try:
+        # 1. Fetch project
+        project = db.query(VideoProject).filter(VideoProject.id == project_id)
+        if owner is not None:
+            project = project.filter(VideoProject.owner == owner)
+        project = project.first()
+        if not project:
+            return {"error": f"Project {project_id} not found", "exit_code": 1}
+
+        # 2. Check output file exists
+        if not project.output_path or not os.path.exists(project.output_path):
+            return {"error": "Project must be rendered successfully before publishing to YouTube.", "exit_code": 1}
+
+        # 3. Fetch YouTube account
+        if account_id:
+            account = db.query(YouTubeAccount).filter(YouTubeAccount.id == account_id)
+            if owner is not None:
+                account = account.filter(YouTubeAccount.owner == owner)
+            account = account.first()
+        else:
+            # default to first enabled account
+            account = db.query(YouTubeAccount)
+            if owner is not None:
+                account = account.filter(YouTubeAccount.owner == owner)
+            account = account.filter(YouTubeAccount.is_enabled == True).first()
+
+        if not account:
+            return {"error": "No connected YouTube/Google account found. Please link an account in settings first.", "exit_code": 1}
+
+        # 4. Prepare metadata
+        metadata = {
+            "title": title or project.title or "Odysseus Video Studio upload",
+            "description": description or project.description or "",
+            "tags": tags or [],
+            "privacy_status": privacy,
+            "category_id": category
+        }
+
+        # Update project status
+        project.status = "publishing"
+        db.commit()
+
+        # 5. Perform the upload
+        try:
+            video_id = await yt_service.upload_video(account, db, project.output_path, metadata)
+            
+            project.status = "published"
+            project.youtube_video_id = video_id
+            
+            # Save publish settings
+            pub_settings = project.publish_settings or {}
+            pub_settings["youtube_video_id"] = video_id
+            pub_settings["account_id"] = account.id
+            pub_settings["published_metadata"] = metadata
+            project.publish_settings = pub_settings
+            
+            db.commit()
+            return {"response": f"Video successfully published to YouTube. Video ID: {video_id}", "video_id": video_id, "exit_code": 0}
+        except Exception as e:
+            project.status = "failed"
+            db.commit()
+            return {"error": f"YouTube upload failed: {str(e)}", "exit_code": 1}
+    finally:
+        db.close()
